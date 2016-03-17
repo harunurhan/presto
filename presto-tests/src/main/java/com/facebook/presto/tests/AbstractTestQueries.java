@@ -3714,7 +3714,7 @@ public abstract class AbstractTestQueries
                 "SELECT 123, 123 FROM orders LIMIT 1");
     }
 
-    @Test(enabled = false)
+    @Test
     public void testWithColumnAliasing()
             throws Exception
     {

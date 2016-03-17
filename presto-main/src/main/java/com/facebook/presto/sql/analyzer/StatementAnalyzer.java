@@ -77,10 +77,12 @@ import com.facebook.presto.sql.tree.Node;
 import com.facebook.presto.sql.tree.QualifiedName;
 import com.facebook.presto.sql.tree.QualifiedNameReference;
 import com.facebook.presto.sql.tree.Query;
+import com.facebook.presto.sql.tree.QueryBody;
 import com.facebook.presto.sql.tree.QuerySpecification;
 import com.facebook.presto.sql.tree.Relation;
 import com.facebook.presto.sql.tree.Row;
 import com.facebook.presto.sql.tree.SampledRelation;
+import com.facebook.presto.sql.tree.Select;
 import com.facebook.presto.sql.tree.SelectItem;
 import com.facebook.presto.sql.tree.ShowCatalogs;
 import com.facebook.presto.sql.tree.ShowColumns;
@@ -1918,11 +1920,53 @@ class StatementAnalyzer
         }
 
         for (WithQuery withQuery : with.getQueries()) {
-            if (withQuery.getColumnNames() != null && !withQuery.getColumnNames().isEmpty()) {
-                throw new SemanticException(NOT_SUPPORTED, withQuery, "Column alias not supported in WITH queries");
+            Query query = withQuery.getQuery();
+            List<String> columnNames = withQuery.getColumnNames();
+            if (columnNames != null && !columnNames.isEmpty()) {
+                // Rewrites the query with column aliases which are specified in WITH
+                // TODO: check duplicates for columnNames. but it is not checked in SELECT such as -> SELECT c1 a, c2 a ...
+
+                if (query.getQueryBody() instanceof  QuerySpecification) {
+                    // Query with select
+                    QuerySpecification querySpecification = (QuerySpecification) query.getQueryBody();
+                    List<SelectItem> selectItems = querySpecification.getSelect().getSelectItems();
+
+                    if (columnNames.size() != selectItems.size()) {
+                        throw new SemanticException(MISMATCHED_COLUMN_ALIASES, query, "WITH column alias list has %s entries but with query has %s columns available", columnNames.size(), selectItems.size());
+                    }
+
+                    ImmutableList.Builder<SelectItem> selectItemsWithAliases = ImmutableList.builder();
+                    for (int i = 0; i < selectItems.size(); i++) {
+                        // TODO: check if selectItem is not instance SingleColumn. is it even possible here?
+                        SingleColumn selectItem = (SingleColumn) selectItems.get(i);
+                        // TODO: check if location is not present. is it even possible here?
+                        selectItemsWithAliases.add(new SingleColumn(selectItem.getLocation().get(), selectItem.getExpression(), Optional.of(columnNames.get(i))));
+                    }
+                    // TODO: remove below (creating new instances) if implementing setSelectItems in Select is a good approach
+                    Select select = querySpecification.getSelect();
+                    Select selectWithAliases = new Select(select.getLocation().get(),
+                            select.isDistinct(),
+                            selectItemsWithAliases.build());
+                    QueryBody queryBodyWithAliases = new QuerySpecification(querySpecification.getLocation().get(),
+                            selectWithAliases,
+                            querySpecification.getFrom(),
+                            querySpecification.getWhere(),
+                            querySpecification.getGroupBy(),
+                            querySpecification.getHaving(),
+                            querySpecification.getOrderBy(),
+                            querySpecification.getLimit());
+                    query = new Query(query.getWith(),
+                            queryBodyWithAliases,
+                            query.getOrderBy(),
+                            query.getLimit(),
+                            query.getApproximate());
+                }
+                else if (query.getQueryBody() instanceof Values){
+                    throw new SemanticException(NOT_SUPPORTED, query.getQueryBody(), "Column alias in WITH queries is not supported for VALUES");
+                }
+                // TODO: else!
             }
 
-            Query query = withQuery.getQuery();
             process(query, context);
 
             String name = withQuery.getName();
